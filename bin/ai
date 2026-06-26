@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+set -eo pipefail
+
+mounts=("-v" "$PWD:/code")
+
+if [ -f agent.yaml ]; then
+  echo "Configuring mounts..."
+  yaml_mounts=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && yaml_mounts+=("-v" "$line")
+  done < <(yq '
+    (.include_ro[] | env(PWD) + "/" + . + ":/code/" + . + ":ro"),
+    (.include[]    | env(PWD) + "/" + . + ":/code/" + . )
+  ' agent.yaml 2>/dev/null)
+
+  if [ ${#yaml_mounts[@]} -gt 0 ]; then
+    mounts=("${yaml_mounts[@]}")
+  fi
+
+  mounts+=("-v" "$PWD/agent.yaml:/agent.yaml:ro")
+fi
+
+rootdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+statedir="$rootdir/state"
+configdir="$rootdir/config"
+
+docker run -it --rm \
+  -p 0:3000 \
+  -e PORT=3000 \
+  "${mounts[@]}" \
+  -v "$HOME/.npmrc:/root/.npmrc:ro" \
+  -v "bun-cache:/root/.bun/install/cache" \
+  -v "$rootdir/container/entrypoint.sh:/entrypoint.sh:ro" \
+  -v "$rootdir/container/.bashrc:/root/.bashrc:ro" \
+  -v "$statedir/.local/state:/root/.local/state" \
+  -v "$statedir/.local/share/opencode:/root/.local/share/opencode" \
+  -v "$statedir/.claude:/root/.claude" \
+  -v "$statedir/.claude.json:/root/.claude.json" \
+  -v "$statedir/.codex:/root/.codex" \
+  -v "$statedir/.pi:/root/.pi" \
+  -v "$configdir/opencode:/root/.config/opencode" \
+  -v "$rootdir/sessions:/var/log/sessions" \
+  -v "$rootdir/context:/agent/context" \
+  --workdir /code \
+  nebula
