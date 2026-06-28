@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+bin="$(dirname "${BASH_SOURCE[0]}")"
+root="$(cd "$bin/.." && pwd)"
+
+source "$bin/config.sh"
+
+params+=(
+  -v "$root/state/.claude:/root/.claude"
+  -v "$root/state/.claude.json:/root/.claude.json"
+  -v "$root/state/.local/state/claude:/root/.local/state/claude"
+  -e IS_SANDBOX=1
+  -e CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+)
+
+docker run -it --rm "${params[@]}" nebula claude --dangerously-skip-permissions

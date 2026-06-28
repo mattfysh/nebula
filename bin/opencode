@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+bin="$(dirname "${BASH_SOURCE[0]}")"
+root="$(cd "$bin/.." && pwd)"
+
+source "$bin/config.sh"
+
+params+=(
+  -v "$root/state/.local/state/opencode:/root/.local/state/opencode"
+  -v "$root/state/.local/share/opencode:/root/.local/share/opencode"
+  -v "$root/config/opencode:/root/.config/opencode"
+  -v "$root/sessions:/var/log/sessions"
+  -v "$root/context:/agent/context"
+)
+
+docker run -it --rm "${params[@]}" nebula opencode

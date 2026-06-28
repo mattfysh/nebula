@@ -6,4 +6,6 @@ if [ -f "/agent.yaml" ]; then
   yq -r '.run' /agent.yaml | bash
 fi
 
-exec bash
+export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
+
+exec "$@"

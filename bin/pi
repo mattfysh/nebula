@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+bin="$(dirname "${BASH_SOURCE[0]}")"
+root="$(cd "$bin/.." && pwd)"
+
+source "$bin/config.sh"
+
+params+=(
+  -v "$root/state/.pi:/root/.pi"
+)
+
+docker run -it --rm "${params[@]}" nebula pi
