@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+bin="$(dirname "${BASH_SOURCE[0]}")"
+root="$(cd "$bin/.." && pwd)"
+
+source "$bin/config.sh"
+
+docker run -it --rm "${params[@]}" nebula bash

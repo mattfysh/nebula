@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+bin="$(dirname "${BASH_SOURCE[0]}")"
+root="$(cd "$bin/.." && pwd)"
+
+docker run -it --rm \
+  -v "$root/mod:/code/mod" \
+  -v "$root/mod/seed:/code/mod/seed:ro" \
+  -w "/code" \
+  --entrypoint bash \
+  oven/bun

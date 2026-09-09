@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Successor</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<section id="login">
+  <h1>Successor</h1><p>Your conversations, from any device.</p>
+  <form id="login-form">
+    <label for="token">Access token</label>
+    <input id="token" type="password" autocomplete="current-password" required>
+    <button>Sign in</button>
+  </form>
+  <p>This grants access to an assistant with shell permissions in the container. Keep your token private.</p>
+</section>
+<main id="workspace" hidden>
+  <aside>
+    <header><strong>Successor</strong><button id="new">+ New</button></header>
+    <button id="open-work">Work queue</button>
+    <nav id="conversations" aria-label="Conversations"></nav>
+    <button id="logout">Sign out</button>
+  </aside>
+  <section id="work" hidden aria-labelledby="work-heading">
+    <header><h1 id="work-heading">Work queue</h1><button id="close-work">Back to chat</button></header>
+    <p class="warning">Plan work in order. Saved across devices. Nothing runs automatically.</p>
+    <p id="work-count" role="status"></p>
+    <button id="work-add" type="button">+ Add work</button>
+    <form id="work-form" hidden>
+      <h2 id="work-editor-heading">Add work</h2>
+      <fieldset id="work-fields">
+        <label>Title<input id="work-title" maxlength="200" required placeholder="What needs doing?"></label>
+        <label>Description<textarea id="work-description" rows="2" maxlength="16000" placeholder="Requirements and desired outcome"></textarea></label>
+        <label>Notes<textarea id="work-notes" rows="2" maxlength="16000" placeholder="Context, ideas, links, or progress"></textarea></label>
+        <div id="work-item-actions" class="actions" aria-label="Item actions"></div>
+        <div class="actions"><button id="work-cancel" type="button" hidden>Close</button><button id="work-save">Add item</button></div>
+      </fieldset>
+    </form>
+    <ol id="work-items" aria-label="Work items in priority order"></ol>
+  </section>
+  <section id="chat">
+    <header><h1 id="title">Choose or create a conversation</h1><button id="rename" disabled>Rename</button></header>
+    <p class="warning">Separate histories · shared files and shell permissions</p>
+    <details id="settings">
+      <summary>Provider, model &amp; reasoning</summary>
+      <form id="settings-form">
+        <label>Provider<select id="provider"></select></label>
+        <label>Model<input id="model" list="model-list" maxlength="160" autocomplete="off" required></label>
+        <datalist id="model-list"></datalist>
+        <label>Reasoning<select id="reasoning"></select></label>
+        <div class="actions"><button id="reset-settings" type="button">Reset</button><button id="apply-settings">Save settings</button></div>
+      </form>
+      <p id="provider-note"></p>
+      <section id="chatgpt-connection" aria-label="ChatGPT connection">
+        <strong>Direct ChatGPT subscription</strong>
+        <p id="chatgpt-status" role="status">Not connected</p>
+        <div class="actions">
+          <button id="chatgpt-connect" type="button">Connect ChatGPT</button>
+          <button id="chatgpt-disconnect" type="button" hidden>Disconnect</button>
+          <button id="chatgpt-models" type="button" hidden>Refresh models</button>
+        </div>
+        <p id="chatgpt-device" hidden>Open <a href="https://auth.openai.com/codex/device" target="_blank" rel="noopener noreferrer">OpenAI’s login page</a> and enter <code id="chatgpt-code"></code>. Only approve a code you requested here. This login expires after 15 minutes.</p>
+        <p class="warning">No API key or external agent required. Compatibility integration: OpenAI’s screen may say “Codex.” Device login must be allowed by your account. Credentials stay on this server; this connection is shared by your chats. Disconnect removes local credentials, not your subscription.</p>
+      </section>
+      <p class="warning">Saved per conversation. Switching provider/model sends visible history as context, without private reasoning. Custom model IDs use default reasoning unless configured on the server.</p>
+    </details>
+    <div id="messages" aria-label="Messages"></div>
+    <p id="status-selection"></p>
+    <p id="status" role="status">Ready</p>
+    <details id="diagnostics">
+      <summary id="diagnostic-heading">Retained attempt details (0)</summary>
+      <p class="warning">Last 50 attempts per conversation, saved across retries and restarts. Retry creates a new attempt; nothing retries automatically. After interruption, commands may have run: inspect effects before continuing. CLI tool progress depends on emitted events.</p>
+      <div id="diagnostic-list"></div>
+      <button id="copy-diagnostics" type="button">Copy sanitized diagnostics</button>
+      <label for="diagnostic-summary" class="sr-only">Sanitized diagnostic summary</label>
+      <textarea id="diagnostic-summary" readonly rows="4" spellcheck="false"></textarea>
+    </details>
+    <form id="compose">
+      <label for="input" class="sr-only">Message</label>
+      <textarea id="input" rows="3" maxlength="32000" placeholder="Ask something… (Ctrl/⌘+Enter to send)" disabled></textarea>
+      <div class="actions"><button id="retry" type="button" hidden>Retry failed turn</button><button id="send" disabled>Send</button></div>
+    </form>
+  </section>
+</main>
+<p id="notice" role="alert"></p>
+</body>
+</html>

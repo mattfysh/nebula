@@ -1,4 +1,5 @@
-params=(-v "$PWD:/code")
+export WORKDIR="/code/$(basename $PWD)"
+params=(-v "$PWD:$WORKDIR")
 
 if [ -f agent.yaml ]; then
   echo "Configuring mounts..."
@@ -6,8 +7,8 @@ if [ -f agent.yaml ]; then
   while IFS= read -r line; do
     [[ -n "$line" ]] && yaml_mounts+=(-v "$line")
   done < <(yq '
-    (.include_ro[] | env(PWD) + "/" + . + ":/code/" + . + ":ro"),
-    (.include[]    | env(PWD) + "/" + . + ":/code/" + . )
+    (.include_ro[] | env(PWD) + "/" + . + ":" + env(WORKDIR) + "/" + . + ":ro"),
+    (.include[]    | env(PWD) + "/" + . + ":" + env(WORKDIR) + "/" + . )
   ' agent.yaml 2>/dev/null)
 
   if [ ${#yaml_mounts[@]} -gt 0 ]; then
@@ -18,7 +19,8 @@ if [ -f agent.yaml ]; then
 fi
 
 params+=(
-  -p 0:3000
+  -w "$WORKDIR"
+  -p 0.0.0.0:0:3000
   -e PORT=3000
   -v "bun-cache:/root/.bun/install/cache"
   -v "$root/container/entrypoint.sh:/entrypoint.sh:ro"

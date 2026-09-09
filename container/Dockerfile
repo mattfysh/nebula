@@ -16,6 +16,5 @@ RUN bun i -g \
   @openai/codex \
   @mariozechner/pi-coding-agent
 
-WORKDIR /code
 COPY entrypoint.sh /
 ENTRYPOINT ["/entrypoint.sh"]
