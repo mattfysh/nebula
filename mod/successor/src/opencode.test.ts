@@ -6,7 +6,9 @@ import { Agent, type Session } from './agent.ts'
 import { builtins, validateSelection, availability } from './providers.ts'
 
 const selection = { provider: 'openai-subscription-opencode', model: 'openai/gpt-5.2-codex', reasoning: 'high' }
-const providers = builtins({})
+const providers = builtins({}); providers.find((p) => p.id === 'openai-subscription-opencode')!.models = [{ id: 'openai/gpt-5.2-codex', reasoning: ['high'] }]
+// Test-only CLI catalog fixture. Production leaves this provider unavailable without discovery.
+providers.find((p) => p.id === 'openai-subscription-opencode')!.protocol = 'opencode'
 async function fixture(script: string) {
   const directory = await mkdtemp(join(tmpdir(), 'successor-opencode-'))
   const executable = join(directory, 'opencode')
@@ -58,7 +60,6 @@ ${event(finish)}
     expect(session.messages.find((m) => m.type === 'custom_tool_call_output')?.output).toBe('/workspace')
     expect(JSON.stringify(session)).not.toContain('PRIVATE-THINKING')
     expect(session.selection).toEqual(selection)
-    expect(availability(providers.find((p) => p.id === selection.provider)!, { PATH: f.env.PATH })).toContain('ENABLE_OPENCODE_SUBSCRIPTION')
     expect(() => validateSelection({ ...selection, model: 'anthropic/claude-sonnet-4-6' }, providers, f.env)).toThrow('openai/<model>')
   } finally { await f.cleanup() }
 })

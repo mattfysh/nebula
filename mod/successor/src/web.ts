@@ -4,10 +4,13 @@ import { resolve, join } from 'node:path'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { z } from 'zod'
 import { workQueue } from './work-queue.ts'
+import { workGraph } from './work-graph/store.ts'
 import { ChatGPTAuth, ChatGPTError } from './chatgpt-auth.ts'
 import { chatgptModels } from './chatgpt.ts'
+import { discoverModels } from './model-discovery.ts'
 import { Agent, Session, recover } from './agent.ts'
-import { Selection, loadProviders, defaultSelection, validateSelection, catalog, type Provider, type Environment } from './providers.ts'
+import { usageSummary } from './usage.ts'
+import { Selection, loadProviders, defaultSelection, validateSelection, catalog, type Provider, type Environment, type Discovery } from './providers.ts'
 
 const RecordSchema = z.object({
   id: z.string().uuid(), title: z.string(), updated: z.string(),
@@ -65,17 +68,18 @@ export async function createApp(options: {
   if (options.apiKey) env.OPENAI_API_KEY = options.apiKey
   if (options.model) env.OPENAI_MODEL = options.model
   const providers = options.providers ?? await loadProviders(env)
-  const defaults = defaultSelection(providers, env)
   const directory = resolve(options.directory)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const work = await workQueue(directory)
+  const plan = await workGraph(directory)
   const chatgpt = options.chatgptAuth ?? await ChatGPTAuth.open(directory)
   const subscription = providers.find((p) => p.protocol === 'chatgpt')
-  const fallback = subscription ? structuredClone(subscription) : undefined
+  const discoveries = new Map<string, Discovery>(providers.map((provider) => [provider.id, { status: 'pending' }]))
   let modelFlight: Promise<void> | undefined, modelChecked = 0, modelGeneration = 0
   const resetModels = () => {
     modelGeneration++; modelChecked = 0
-    if (subscription && fallback) { subscription.models = fallback.models; subscription.note = fallback.note }
+    if (subscription) subscription.models = []
+    if (subscription) discoveries.set(subscription.id, { status: 'pending' })
   }
   const refreshModels = async () => {
     if (modelFlight) return modelFlight
@@ -87,17 +91,43 @@ export async function createApp(options: {
         const models = await chatgptModels(chatgpt, options.agentOptions?.fetch)
         if (generation !== modelGeneration || !chatgpt.status().connected || !subscription) return
         subscription.models = models
-        subscription.note = 'Direct ChatGPT connection using this app’s agent and bash tool. Model capabilities loaded from ChatGPT; availability still depends on your account.'
-      } catch {
+        discoveries.set(subscription.id, { status: 'ready' })
+        subscription.note = 'Model capabilities loaded from the signed-in ChatGPT account.'
+      } catch (error) {
         if (generation !== modelGeneration) return
-        if (subscription && fallback) {
-          subscription.models = fallback.models
-          subscription.note = 'Model discovery unavailable. Showing fallback suggestions; verify model access with your subscription. No API-key fallback.'
+        const reason = error instanceof ChatGPTError ? error.message : 'Model metadata response was not recognized.'
+        console.error('[ChatGPT] model discovery failed:', reason)
+        if (subscription) {
+          subscription.models = []
+          discoveries.set(subscription.id, { status: 'error', error: 'ChatGPT model catalog lookup failed. Refresh models or reconnect.' })
+          subscription.note = 'Model catalog unavailable; this provider cannot be used.'
         }
       }
     })().finally(() => { modelFlight = undefined })
     return modelFlight
   }
+  // Catalog lookup is authoritative. Providers remain unavailable on any failure.
+  for (const provider of providers) {
+    if (provider.protocol === 'chatgpt') {
+      if (chatgpt.status().connected) await refreshModels()
+      else discoveries.set(provider.id, { status: 'error', error: 'Connect ChatGPT to load models.' })
+      continue
+    }
+    if (!['responses', 'chat', 'anthropic'].includes(provider.protocol)) {
+      discoveries.set(provider.id, { status: 'error', error: 'Model discovery is not integrated for this provider.' })
+      continue
+    }
+    try {
+      provider.models = await discoverModels(provider, env, options.agentOptions?.fetch)
+      discoveries.set(provider.id, { status: 'ready' })
+    } catch {
+      provider.models = []
+      discoveries.set(provider.id, { status: 'error', error: 'Model catalog lookup failed. Check provider credentials and endpoint.' })
+    }
+  }
+  let defaults: ReturnType<typeof defaultSelection> | undefined
+  try { defaults = defaultSelection(providers, env) } catch {}
+
   const conversations = new Map<string, Conversation>()
   const writes = new Map<string, Promise<void>>()
   const persist = (c: Conversation) => {
@@ -113,7 +143,7 @@ export async function createApp(options: {
     const c = RecordSchema.parse(JSON.parse(await readFile(join(directory, name), 'utf8')))
     if (name !== `${c.id}.json`) throw new Error('Conversation filename mismatch')
     recover(c.session)
-    c.session.selection ??= defaults
+    if (!c.session.selection && defaults) c.session.selection = defaults
     // Old generic errors have no reliable cause. Do not inspect old raw payloads.
     if (!c.session.diagnostics?.length && ['error', 'interrupted', 'queued', 'running'].includes(c.status)) {
       const legacy = beginAttempt(c.session, c.session.selection)
@@ -132,10 +162,11 @@ export async function createApp(options: {
     conversations.set(c.id, c)
   }
   const create = async (title: string, session: Session = { version: 1, messages: [] }) => {
+    if (!session.selection && !defaults) throw new Error('No usable provider model catalog. Check provider status.')
     recoverAttempts(session)
     const c: Conversation = { id: crypto.randomUUID(), title, updated: new Date().toISOString(), status: 'idle', session }
     recover(c.session)
-    c.session.selection ??= defaults
+    if (!c.session.selection && defaults) c.session.selection = defaults
     await persist(c)
     conversations.set(c.id, c)
     return c
@@ -144,8 +175,61 @@ export async function createApp(options: {
   if (!conversations.size && options.seed && await Bun.file(options.seed).exists())
     await create('CLI conversation (imported snapshot)', Session.parse(await Bun.file(options.seed).json()))
 
+  // Live text is intentionally ephemeral: only completed, validated output is persisted.
+  // Subscribers receive deltas while a turn runs, then a reset and authoritative refresh.
+  const liveText = new Map<string, string>()
+  // One application-wide event stream replaces per-conversation streams and polling.
+  const subscribers = new Set<ReadableStreamDefaultController<Uint8Array>>()
+  const encoder = new TextEncoder()
+  const publish = (id: string, event: string, data: Record<string, unknown>) => {
+    const chunk = encoder.encode(`event: ${event}\ndata: ${JSON.stringify({ id, ...data })}\n\n`)
+    for (const controller of subscribers) {
+      try { controller.enqueue(chunk) } catch { subscribers.delete(controller) }
+    }
+  }
+  const stream = (id: string, text: string | null) => {
+    if (text === null) { liveText.delete(id); publish(id, 'reset', {}) }
+    else { liveText.set(id, (liveText.get(id) ?? '') + text); publish(id, 'delta', { text }) }
+  }
+  // Keep idle SSE connections alive through browser/proxy idle timeouts.
+  const heartbeat = setInterval(() => {
+    const chunk = encoder.encode(': keepalive\n\n')
+    for (const controller of subscribers) {
+      try { controller.enqueue(chunk) } catch { subscribers.delete(controller) }
+    }
+  }, 15_000)
+  const closeStreams = () => {
+    clearInterval(heartbeat)
+    for (const controller of subscribers) { try { controller.close() } catch {} }
+    subscribers.clear()
+  }
   let connectionChanging = false
-  let queue = Promise.resolve()
+  // Run up to three independent conversations at once. Additional turns remain
+  // queued; the existing status guard still permits only one turn per conversation.
+  const maxParallelTurns = 3
+  let runningTurns = 0
+  const pendingTurns: Array<() => void> = []
+  const drainWaiters = new Set<() => void>()
+  const schedule = (task: () => Promise<void>) => {
+    const run = () => {
+      runningTurns++
+      void task().catch(() => {
+        console.error('Conversation checkpoint failed; check disk permissions and space.')
+      }).finally(() => {
+        runningTurns--
+        pendingTurns.shift()?.()
+        if (!runningTurns && !pendingTurns.length) {
+          for (const resolve of drainWaiters) resolve()
+          drainWaiters.clear()
+        }
+      })
+    }
+    if (runningTurns < maxParallelTurns) run()
+    else pendingTurns.push(run)
+  }
+  const turnsDrained = () => !runningTurns && !pendingTurns.length
+    ? Promise.resolve()
+    : new Promise<void>((resolve) => drainWaiters.add(resolve))
   const enqueue = async (c: Conversation, input?: string) => {
     if (c.status === 'running' || c.status === 'queued') return false
     const attempt = beginAttempt(c.session, c.session.selection ?? defaults, input === undefined)
@@ -153,7 +237,9 @@ export async function createApp(options: {
     // Prior diagnostics and the last failure are never erased on enqueue.
     try {
       let selected: ReturnType<typeof validateSelection>
-      try { selected = validateSelection(c.session.selection ?? defaults, providers, env) }
+      try {
+        if (!c.session.selection && !defaults) throw new Error('No model catalog')
+        selected = validateSelection(c.session.selection ?? defaults!, providers, env, discoveries) }
       catch { throw new DiagnosticError('configuration') }
       if (selected.provider.protocol === 'chatgpt' && (connectionChanging || !chatgpt.status().connected))
         throw new DiagnosticError('auth')
@@ -175,15 +261,25 @@ export async function createApp(options: {
       try { await persist(c) } catch { /* In-memory status remains available while disk is unavailable. */ }
       throw new DiagnosticError('storage')
     }
-    queue = queue.then(async () => {
+    schedule(async () => {
       try {
         c.status = 'running'
         try { await persist(c) } catch { attempt.storageFailed = true; attempt.phase = 'checkpoint'; throw new DiagnosticError('storage') }
+        let visibleTranscript = JSON.stringify(transcript(c.session))
         const agent = new Agent(c.session, {
           ...options.agentOptions,
           env, providers, chatgpt, model: options.model,
           selection: c.session.selection, attempt,
-          checkpoint: async () => { c.updated = new Date().toISOString(); await persist(c) },
+          checkpoint: async () => {
+            c.updated = new Date().toISOString()
+            await persist(c)
+            const nextTranscript = JSON.stringify(transcript(c.session))
+            if (nextTranscript !== visibleTranscript) {
+              visibleTranscript = nextTranscript
+              publish(c.id, "refresh", {})
+            }
+          },
+          stream: (text) => stream(c.id, text),
         })
         await agent.turn(undefined, () => {})
         c.status = 'idle'
@@ -195,6 +291,8 @@ export async function createApp(options: {
         c.status = attempt.status === 'interrupted' ? 'interrupted' : 'error'
         c.error = advice[attempt.category ?? 'unknown']
       } finally {
+        // Retract partial output on errors and tell clients to load committed history.
+        stream(c.id, null)
         c.updated = new Date().toISOString()
         try { await persist(c) }
         catch {
@@ -203,8 +301,9 @@ export async function createApp(options: {
           c.status = 'error'; c.error = advice.storage
           try { await persist(c) } catch { console.error('Conversation checkpoint failed; check disk permissions and space. Diagnostics are in memory only until storage works.') }
         }
+        publish(c.id, 'refresh', {})
       }
-    }).catch(() => { console.error('Conversation checkpoint failed; check disk permissions and space.') })
+    })
     return true
   }
   const cookieValue = createHash('sha256').update('web-session:' + options.token).digest('hex')
@@ -217,7 +316,11 @@ export async function createApp(options: {
   }
   const json = (value: unknown, status = 200, extra = {}) =>
     Response.json(value, { status, headers: { ...headers, ...extra } })
-  const summary = (c: Conversation) => ({ id: c.id, title: c.title, status: c.status, updated: c.updated, error: c.error, attempt: c.session.diagnostics?.at(-1) ? diagnosticSummary(c.session.diagnostics.at(-1)!) : undefined, selection: c.session.selection ?? defaults })
+  const summary = (c: Conversation) => {
+    const selection = c.session.selection ?? defaults
+    if (!selection) return { id: c.id, title: c.title, status: c.status, updated: c.updated, error: 'No usable provider model catalog.', selection: null, usage: usageSummary(c.session.usage, undefined) }
+    return { id: c.id, title: c.title, status: c.status, updated: c.updated, error: c.error, attempt: c.session.diagnostics?.at(-1) ? diagnosticSummary(c.session.diagnostics.at(-1)!) : undefined, selection, usage: usageSummary(c.session.usage, providers.find((p) => p.id === selection.provider)) }
+  }
   let loginWindow = 0, attempts = 0
 
   const handler = async (req: Request): Promise<Response> => {
@@ -260,6 +363,10 @@ export async function createApp(options: {
     if (path.startsWith('/api/')) {
       const cookie = req.headers.get('cookie')?.split(';').map((s) => s.trim()).find((s) => s.startsWith('successor='))?.slice(10)
       if (!cookie || !equal(cookie, cookieValue)) return json({ error: 'Sign in required' }, 401)
+      if (path === '/api/work-plan') {
+        if (req.method === 'GET') return json(plan.read())
+        if (req.method === 'POST') { const result = await plan.change(await body()); return json(result.body, result.status) }
+      }
       if (path === '/api/work-queue') {
         if (req.method === 'GET') return json(work.read())
         if (req.method === 'POST') {
@@ -270,11 +377,6 @@ export async function createApp(options: {
       if (path === '/api/chatgpt' && req.method === 'GET') return json(chatgpt.status())
       if (path.startsWith('/api/chatgpt/') && req.method === 'POST') {
         z.object({}).strict().parse(await body())
-        if (path === '/api/chatgpt/models') {
-          if (!chatgpt.status().connected) return json({ error: 'Connect ChatGPT first' }, 409)
-          await refreshModels()
-          return json({ providers: catalog(providers, env, chatgpt.status().connected), defaults })
-        }
         if (path === '/api/chatgpt/connect' || path === '/api/chatgpt/disconnect') {
           if ([...conversations.values()].some((c) => ['queued', 'running'].includes(c.status) &&
             providers.find((p) => p.id === c.session.selection?.provider)?.protocol === 'chatgpt'))
@@ -286,13 +388,53 @@ export async function createApp(options: {
           finally { connectionChanging = false }
         }
       }
+      if (path === '/api/providers/models' && req.method === 'POST') {
+        const { provider: id } = z.object({ provider: z.string().min(1).max(80) }).strict().parse(await body())
+        const provider = providers.find((candidate) => candidate.id === id)
+        if (!provider) return json({ error: 'Unknown provider' }, 404)
+        try {
+          if (provider.protocol === 'chatgpt') {
+            if (!chatgpt.status().connected) return json({ error: 'Connect ChatGPT first' }, 409)
+            await refreshModels()
+          } else {
+            provider.models = await discoverModels(provider, env, options.agentOptions?.fetch)
+            discoveries.set(provider.id, { status: 'ready' })
+            provider.note = 'Model IDs loaded from the provider. Reasoning controls are shown only where their capabilities are known.'
+          }
+          return json({ providers: catalog(providers, env, chatgpt.status().connected, discoveries), defaults })
+        } catch (error) {
+          provider.models = []
+          discoveries.set(provider.id, { status: 'error', error: 'Model catalog lookup failed. Check provider credentials and endpoint.' })
+          // Provider payloads and parser errors are server-side diagnostics only.
+          console.error('[Models] discovery failed for', provider.id, error instanceof Error ? error.name : 'unknown')
+          return json({ error: 'Model discovery failed. This provider is unavailable.' }, 502)
+        }
+      }
       if (path === '/api/providers' && req.method === 'GET')
-        return json({ providers: catalog(providers, env, chatgpt.status().connected), defaults })
+        return json({ providers: catalog(providers, env, chatgpt.status().connected, discoveries), defaults })
       if (path === '/api/logout' && req.method === 'POST')
         return json({ ok: true }, 200, { 'set-cookie': 'successor=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' })
       if (path === '/api/conversations') {
         if (req.method === 'GET') return json([...conversations.values()].map(summary).sort((a,b) => b.updated.localeCompare(a.updated)))
         if (req.method === 'POST') return json(summary(await create('New conversation')), 201)
+      }
+      if (path === '/api/events' && req.method === 'GET') {
+        let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+        const response = new ReadableStream<Uint8Array>({
+          start(value) {
+            controller = value
+            subscribers.add(value)
+            value.enqueue(encoder.encode(`event: snapshot\ndata: ${JSON.stringify({ streams: Object.fromEntries(liveText) })}\n\n`))
+          },
+          cancel() { if (controller) subscribers.delete(controller) },
+        })
+        // Detach on transport cancellation. Closing an already-aborted Bun stream
+        // can surface as ERR_INCOMPLETE_CHUNKED_ENCODING in browsers.
+        req.signal.addEventListener('abort', () => { if (controller) subscribers.delete(controller) }, { once: true })
+        return new Response(response, { headers: {
+          ...headers, 'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no',
+        } })
       }
       const match = /^\/api\/conversations\/([^/]+)(\/turn)?$/.exec(path)
       if (match && uuid.safeParse(match[1]).success) {
@@ -307,8 +449,8 @@ export async function createApp(options: {
           if (data.selection) {
             if (['queued', 'running'].includes(c.status))
               return json({ error: 'Cannot change provider/model during an active turn' }, 409)
-            try { validateSelection(data.selection, providers, env) }
-            catch { return json({ error: 'Provider unavailable or model/reasoning setting unsupported. Check provider setup and choose a supported reasoning level.' }, 400) }
+            try { validateSelection(data.selection, providers, env, discoveries) }
+            catch { return json({ error: 'Provider unavailable or model, reasoning, or speed setting unsupported. Refresh capabilities and choose supported settings.' }, 400) }
             c.session.selection = data.selection
           }
           if (data.title !== undefined) c.title = data.title
@@ -333,7 +475,19 @@ export async function createApp(options: {
     const files: Record<string, [string, string]> = {
       '/': ['index.html', 'text/html; charset=utf-8'],
       '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+      '/markdown.js': ['markdown.js', 'text/javascript; charset=utf-8'],
+      '/katex.css': ['katex.css', 'text/css; charset=utf-8'],
       '/style.css': ['style.css', 'text/css; charset=utf-8'],
+      '/plan': ['plan.html', 'text/html; charset=utf-8'],
+      '/plan.js': ['plan.js', 'text/javascript; charset=utf-8'],
+      '/plan.css': ['plan.css', 'text/css; charset=utf-8'],
+    }
+    if (req.method === 'GET' && path.startsWith('/fonts/')) {
+      const name = path.slice(7)
+      if (/^[A-Za-z0-9_.-]+$/.test(name)) {
+        const font = Bun.file(join(import.meta.dir, 'web', 'fonts', name))
+        if (await font.exists()) return new Response(font, { headers: { ...headers, 'content-type': name.endsWith('.woff2') ? 'font/woff2' : name.endsWith('.woff') ? 'font/woff' : 'application/octet-stream' } })
+      }
     }
     const file = files[path]
     if (req.method === 'GET' && file)
@@ -345,8 +499,8 @@ export async function createApp(options: {
       try { return await handler(req) }
       catch (error) { return json({ error: error instanceof DiagnosticError ? advice[error.category] : 'Request failed; check input or server storage' }, 400) }
     },
-    drained: () => Promise.all([queue, work.drained()]),
-    close: () => chatgpt.close(),
+    drained: () => Promise.all([turnsDrained(), work.drained(), plan.drained()]),
+    close: () => { closeStreams(); return chatgpt.close() },
   }
 }
 
@@ -358,7 +512,7 @@ if (import.meta.main) {
     seed: resolve(process.env.SESSION_FILE ?? 'session.json'),
   })
   const server = Bun.serve({
-    hostname: '127.0.0.1', port: Number(process.env.WEB_PORT ?? 3000),
+    hostname: '0.0.0.0', port: Number(process.env.WEB_PORT ?? 3000),
     maxRequestBodySize: 65_536, fetch: app.fetch,
   })
   console.log(`Successor web: ${server.url}\nAccess token: ${join(directory, 'access-token')} (keep private)\nOne server per data directory; start via bun run web for locking.`)

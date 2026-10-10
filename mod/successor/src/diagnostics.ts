@@ -12,6 +12,7 @@ const Metadata = z.object({
   network: z.enum(['dns', 'connection', 'tls', 'unknown']).optional(),
   timeoutMs: z.number().nonnegative().finite().optional(),
   exitCode: z.number().int().optional(),
+  providerDetail: z.string().max(500).optional(),
   providerCode: z.enum(['invalid_api_key', 'authentication_error', 'rate_limit_exceeded', 'insufficient_quota', 'overloaded_error', 'invalid_request_error']).optional(),
 })
 export type Metadata = z.infer<typeof Metadata>
@@ -19,7 +20,7 @@ const safeName = z.string().max(120).regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/)
 export const Attempt = z.object({
   id: z.string().uuid(), turnId: z.string().uuid(), retryOf: z.string().uuid().optional(),
   timestamp: z.string().datetime(), startedAt: z.string().datetime().optional(), endedAt: z.string().datetime().optional(),
-  provider: safeName, model: safeName, reasoning: safeName,
+  provider: safeName, model: safeName, reasoning: safeName, serviceTier: safeName.optional(),
   status: z.enum(['queued', 'running', 'succeeded', 'failed', 'interrupted']), phase: Phase,
   elapsedMs: z.number().nonnegative(), round: z.number().int().nonnegative(), toolsCompleted: z.number().int().nonnegative(),
   checkpointAt: z.string().datetime().optional(), checkpointItems: z.number().int().nonnegative().optional(),
@@ -30,12 +31,13 @@ export const RETAIN_ATTEMPTS = 50
 export const Attempts = z.array(Attempt).max(RETAIN_ATTEMPTS)
 type History = { diagnostics?: Attempt[] }
 const name = (value?: string) => safeName.safeParse(value).success ? value! : 'unknown'
-export function beginAttempt(history: History, selection?: { provider: string, model: string, reasoning: string }, retry = false) {
+export function beginAttempt(history: History, selection?: { provider: string, model: string, reasoning: string, serviceTier?: string }, retry = false) {
   const list = history.diagnostics ??= [], previous = retry ? list.at(-1) : undefined
   const attempt: Attempt = {
     id: crypto.randomUUID(), turnId: previous?.turnId ?? crypto.randomUUID(),
     ...(previous ? { retryOf: previous.id } : {}), timestamp: new Date().toISOString(),
     provider: name(selection?.provider), model: name(selection?.model), reasoning: name(selection?.reasoning),
+    ...(selection?.serviceTier ? { serviceTier: name(selection.serviceTier) } : {}),
     status: 'queued', phase: 'queued', elapsedMs: 0, round: 0, toolsCompleted: 0,
   }
   list.push(attempt)
@@ -80,8 +82,9 @@ export function ioError(error: unknown, timeoutMs?: number): DiagnosticError {
     : ['CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'ERR_TLS_CERT_ALTNAME_INVALID'].includes(String(code)) ? 'tls' : undefined
   return network ? new DiagnosticError('network', { network }) : new DiagnosticError('unknown')
 }
-export function httpError(response: Response) {
-  return new DiagnosticError([401, 403].includes(response.status) ? 'auth' : response.status === 429 ? 'rate_limit' : 'http', { httpStatus: response.status })
+export function httpError(response: Response, providerDetail?: string) {
+  const detail = providerDetail?.replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, 500)
+  return new DiagnosticError([401, 403].includes(response.status) ? "auth" : response.status === 429 ? "rate_limit" : "http", { httpStatus: response.status, ...(detail ? { providerDetail: detail } : {}) })
 }
 export function failure(error: unknown) { return error instanceof DiagnosticError ? error : new DiagnosticError('unknown') }
 export function finishAttempt(a: Attempt, error?: unknown) {

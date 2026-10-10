@@ -1,119 +1,91 @@
 import { z } from 'zod'
 
 export const Selection = z.object({
-  provider: z.string().min(1).max(80),
-  model: z.string().trim().min(1).max(160).regex(/^[\w./:+-]+$/),
+  provider: z.string().min(1).max(80), model: z.string().trim().min(1).max(160).regex(/^[\w./:+-]+$/),
   reasoning: z.string().max(40).default('default'),
+  // `auto` (and legacy `default`) omit service_tier; `standard` sends wire value `default`.
+  serviceTier: z.string().min(1).max(40).regex(/^[a-z0-9_-]+$/).optional(),
 }).strict()
 export type Selection = z.infer<typeof Selection>
+export const ServiceTier = z.object({ id: z.string().min(1).max(40).regex(/^[a-z0-9_-]+$/), name: z.string().min(1).max(80), description: z.string().max(240).optional(), available: z.boolean().optional(), unavailableReason: z.string().max(160).optional() })
 export const Model = z.object({
-  id: Selection.shape.model,
+  id: Selection.shape.model, label: z.string().min(1).max(120).optional(),
   reasoning: z.array(z.string().min(1).max(40)).default([]),
-  reasoningMode: z.enum(['effort', 'budget', 'adaptive']).optional(),
+  unavailableReasoning: z.array(z.string().min(1).max(40)).optional(),
+  reasoningMode: z.enum(['effort', 'budget', 'adaptive']).optional(), serviceTiers: z.array(ServiceTier).optional(),
 })
 export const Provider = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/), label: z.string(),
   protocol: z.enum(['responses', 'chat', 'anthropic', 'codex', 'opencode', 'chatgpt', 'unavailable']),
-  baseURL: z.string().url().optional(),
-  keyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/).optional(),
-  models: z.array(Model).min(1),
-  note: z.string().optional(),
+  baseURL: z.string().url().optional(), keyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/).optional(),
+  models: z.array(Model).default([]), note: z.string().optional(),
 })
 export type Provider = z.infer<typeof Provider>
 export type Environment = Record<string, string | undefined>
-const effort = ['low', 'medium', 'high']
-export function builtins(env: Environment = process.env): Provider[] {
+export type Discovery = { status: 'pending' | 'ready' | 'error', error?: string }
+export const DEFAULT_PROVIDER = 'openai-chatgpt'
+export function builtins(_env: Environment = process.env): Provider[] {
   return [
-    { id: 'openai', label: 'OpenAI API', protocol: 'responses',
-      baseURL: 'https://api.openai.com/v1', keyEnv: 'OPENAI_API_KEY',
-      models: [
-        { id: env.OPENAI_MODEL ?? 'gpt-6-astra', reasoning: [] },
-        { id: 'gpt-5.2', reasoning: ['none', ...effort, 'xhigh'] },
-        { id: 'gpt-5', reasoning: ['minimal', ...effort] },
-        { id: 'gpt-4.1', reasoning: [] },
-      ].filter((m, i, a) => a.findIndex((x) => x.id === m.id) === i) },
-    { id: 'anthropic', label: 'Claude API', protocol: 'anthropic',
-      baseURL: 'https://api.anthropic.com/v1', keyEnv: 'ANTHROPIC_API_KEY',
-      models: [
-        { id: 'claude-sonnet-4-6', reasoning: effort, reasoningMode: 'adaptive' },
-        { id: 'claude-opus-4-6', reasoning: [...effort, 'max'], reasoningMode: 'adaptive' },
-        { id: 'claude-sonnet-4-5', reasoning: effort, reasoningMode: 'budget' },
-      ] },
-    { id: 'opencode', label: 'OpenCode Zen (API)', protocol: 'chat',
-      baseURL: 'https://opencode.ai/zen/v1', keyEnv: 'OPENCODE_API_KEY',
-      models: [{ id: 'gpt-5.2', reasoning: ['none', ...effort, 'xhigh'] }],
-      note: 'OpenAI-compatible Zen models. For other Zen model protocols, add a provider profile.' },
-    { id: 'openai-chatgpt', label: 'OpenAI — ChatGPT subscription (direct)', protocol: 'chatgpt',
-      models: [
-        { id: 'gpt-5.2-codex', reasoning: [...effort, 'xhigh'] },
-        { id: 'gpt-5.3-codex', reasoning: [...effort, 'xhigh'] },
-      ],
-      note: 'Connect ChatGPT in this app. No API key, Codex or OpenCode executable. Codex-compatible OAuth; OpenAI may label the login Codex. Fallback model catalog, not verified account access.' },
-    { id: 'openai-subscription-opencode', label: 'OpenAI subscription (OpenCode)', protocol: 'opencode',
-      models: [{ id: 'openai/gpt-5.2-codex', reasoning: [...effort, 'xhigh'] }],
-      note: 'Uses OpenCode’s OpenAI ChatGPT login, not Zen or Codex CLI. Set ENABLE_OPENCODE_SUBSCRIPTION=1. OpenCode owns auth, tools, permissions and local history.' },
-    { id: 'openai-subscription', label: 'OpenAI subscription (Codex CLI)', protocol: 'codex',
-      models: [{ id: 'gpt-5.2-codex', reasoning: [...effort, 'xhigh'] }],
-      note: 'Requires official codex CLI, codex login, and ENABLE_CODEX_SUBSCRIPTION=1. Uses Codex’s own workspace-write sandbox/tools; availability depends on your plan.' },
-    { id: 'claude-subscription', label: 'Claude subscription (not integrated)', protocol: 'unavailable',
-      models: [{ id: 'claude-sonnet-4-6', reasoning: [] }],
-      note: 'No subscription-token reuse or unofficial OAuth. Use Claude API here; subscription integration is not enabled pending an explicitly supported third-party route.' },
+    { id: 'openai', label: 'OpenAI API', protocol: 'responses', baseURL: 'https://api.openai.com/v1', keyEnv: 'OPENAI_API_KEY', models: [] },
+    { id: 'anthropic', label: 'Claude API', protocol: 'anthropic', baseURL: 'https://api.anthropic.com/v1', keyEnv: 'ANTHROPIC_API_KEY', models: [] },
+    { id: 'opencode', label: 'OpenCode Zen (API)', protocol: 'chat', baseURL: 'https://opencode.ai/zen/v1', keyEnv: 'OPENCODE_API_KEY', models: [] },
+    { id: 'openai-chatgpt', label: 'OpenAI — ChatGPT subscription (direct)', protocol: 'chatgpt', models: [], note: 'Connect ChatGPT to load the account model catalog.' },
+    { id: 'openai-subscription-opencode', label: 'OpenAI subscription (OpenCode)', protocol: 'opencode', models: [], note: 'Model discovery for this CLI-backed provider is not integrated.' },
+    { id: 'openai-subscription', label: 'OpenAI subscription (Codex CLI)', protocol: 'codex', models: [], note: 'Model discovery for this CLI-backed provider is not integrated.' },
+    { id: 'claude-subscription', label: 'Claude subscription (not integrated)', protocol: 'unavailable', models: [], note: 'Subscription integration is not available.' },
   ]
 }
 export async function loadProviders(env: Environment = process.env): Promise<Provider[]> {
-  const providers = builtins(env)
+  const providers = builtins()
   if (env.PROVIDERS_FILE) {
     const extra = z.array(Provider.strict()).parse(await Bun.file(env.PROVIDERS_FILE).json())
     for (const provider of extra) {
+      // Profile model data is deliberately discarded: catalogs are authoritative.
+      provider.models = []
       const index = providers.findIndex((p) => p.id === provider.id)
-      if (index < 0) providers.push(provider)
-      else providers[index] = provider
+      if (index < 0) providers.push(provider); else providers[index] = provider
     }
   }
   return providers
 }
-export function availability(p: Provider, env: Environment = process.env) {
+export function availability(p: Provider, env: Environment = process.env, discovery?: Discovery) {
   if (p.protocol === 'unavailable') return p.note ?? 'Not supported'
-  if (p.protocol === 'codex')
-    return env.ENABLE_CODEX_SUBSCRIPTION === '1' && Bun.which('codex', { PATH: env.PATH }) ? undefined : 'Install/login to Codex CLI and set ENABLE_CODEX_SUBSCRIPTION=1'
-  if (p.protocol === 'opencode')
-    return env.ENABLE_OPENCODE_SUBSCRIPTION === '1' && Bun.which('opencode', { PATH: env.PATH }) ? undefined : 'Sign in to OpenAI with OpenCode and set ENABLE_OPENCODE_SUBSCRIPTION=1 (no Codex needed)'
-  if (p.protocol === 'chatgpt') return undefined // Connection is checked at turn time, not while editing settings.
-  if (!p.baseURL) return 'Missing base URL'
-  if (p.keyEnv && !env[p.keyEnv]) return `Set ${p.keyEnv} on the server`
+  if (p.protocol === 'codex' && !p.models.length) return discovery?.error ?? 'Model discovery for Codex CLI is unavailable.'
+  if (p.protocol === 'opencode' && !p.models.length) return discovery?.error ?? 'Model discovery for OpenCode CLI is unavailable.'
+  if (!['chatgpt', 'codex', 'opencode'].includes(p.protocol)) {
+    if (!p.baseURL) return 'Missing base URL'
+    if (p.keyEnv && !env[p.keyEnv]) return `Set ${p.keyEnv} on the server`
+  }
+  const state = discovery ?? (p.models.length ? { status: 'ready' as const } : { status: 'pending' as const })
+  if (state.status !== 'ready') return state.error ?? 'Model catalog has not been loaded.'
+  if (!p.models.length) return 'Provider returned no usable models.'
   return undefined
 }
-export function catalog(providers: Provider[], env: Environment = process.env, chatgptConnected = false) {
+export function catalog(providers: Provider[], env: Environment = process.env, chatgptConnected = false, discoveries: Map<string, Discovery> = new Map()) {
   return providers.map((p) => ({
     id: p.id, label: p.label, models: p.models, note: p.note,
-    connectable: p.protocol === 'chatgpt',
-    unavailable: p.protocol === 'chatgpt' && !chatgptConnected ? 'Connect ChatGPT' : availability(p, env),
+    connectable: p.protocol === 'chatgpt', modelDiscovery: p.protocol === 'chatgpt' || ['responses', 'chat', 'anthropic'].includes(p.protocol),
+    supportsServiceTier: ['responses', 'chat', 'chatgpt', 'codex'].includes(p.protocol),
+    unavailable: p.protocol === 'chatgpt' && !chatgptConnected ? 'Connect ChatGPT to load models.' : availability(p, env, discoveries.get(p.id)),
   }))
 }
-export function validateSelection(value: unknown, providers: Provider[], env: Environment = process.env) {
-  const selection = Selection.parse(value)
-  const provider = providers.find((p) => p.id === selection.provider)
+export function validateSelection(value: unknown, providers: Provider[], env: Environment = process.env, discoveries?: Map<string, Discovery>) {
+  const selection = Selection.parse(value), provider = providers.find((p) => p.id === selection.provider)
   if (!provider) throw new Error('Unknown provider')
-  const unavailable = availability(provider, env)
+  const unavailable = availability(provider, env, discoveries?.get(provider.id))
   if (unavailable) throw new Error(unavailable)
-  if (provider.protocol === 'opencode' && !selection.model.startsWith('openai/'))
-    throw new Error('OpenCode subscription models must use openai/<model>.')
+  if (provider.protocol === 'opencode' && !selection.model.startsWith('openai/')) throw new Error('OpenCode subscription models must use openai/<model>.')
   const model = provider.models.find((m) => m.id === selection.model)
-  if (selection.reasoning !== 'default' && !model?.reasoning.includes(selection.reasoning))
-    throw new Error('Reasoning level is not supported for this model; use default or configure its capabilities.')
-  if (selection.reasoning !== 'default' && provider.protocol === 'anthropic') {
-    const supported = model?.reasoningMode === 'budget' ? ['low', 'medium', 'high']
-      : model?.reasoningMode === 'adaptive' ? ['low', 'medium', 'high', 'max'] : []
-    if (!supported.includes(selection.reasoning))
-      throw new Error('Configure a supported Claude reasoning mode and level.')
-  }
+  if (!model) throw new Error('Model is not in the provider catalog.')
+  if (selection.reasoning !== 'default' && !model.reasoning.includes(selection.reasoning)) throw new Error('Reasoning level is not supported for this model.')
+  if (selection.serviceTier && !['auto', 'default', 'standard'].includes(selection.serviceTier) && !model.serviceTiers?.some((tier) => tier.id === selection.serviceTier && tier.available !== false)) throw new Error('Service tier is not supported for this model.')
+  if (selection.serviceTier && !['auto', 'default'].includes(selection.serviceTier) && !['responses', 'chat', 'chatgpt', 'codex'].includes(provider.protocol)) throw new Error('Service tier is not supported by this provider.')
   return { selection, provider, model }
 }
 export function defaultSelection(providers: Provider[], env: Environment = process.env): Selection {
-  const provider = env.AI_PROVIDER ?? 'openai'
-  return Selection.parse({
-    provider,
-    model: env.AI_MODEL ?? providers.find((p) => p.id === provider)?.models[0]?.id ?? 'gpt-6-astra',
-    reasoning: env.AI_REASONING ?? 'default',
-  })
+  const provider = env.AI_PROVIDER ?? DEFAULT_PROVIDER
+  const available = providers.find((p) => p.id === provider)?.models ?? []
+  const model = env.AI_MODEL ?? available.find((model) => model.id === 'gpt-6.1-sol')?.id ?? available[0]?.id
+  if (!model) throw new Error(`No discovered models for default provider ${provider}.`)
+  return Selection.parse({ provider, model, reasoning: env.AI_REASONING ?? 'default', serviceTier: env.AI_SERVICE_TIER ?? 'auto' })
 }

@@ -4,12 +4,13 @@ import { parseArgs } from 'node:util'
 import { Agent, Session, recover, save } from './agent.ts'
 import { ChatGPTAuth } from './chatgpt-auth.ts'
 import { chatgptModels } from './chatgpt.ts'
+import { discoverModels } from './model-discovery.ts'
 import { loadProviders, defaultSelection, validateSelection, catalog, type Selection } from './providers.ts'
 
 async function main() {
   const { values } = parseArgs({
     args: process.argv.slice(2),
-    options: { provider: { type: 'string' }, model: { type: 'string' }, reasoning: { type: 'string' } },
+    options: { provider: { type: 'string' }, model: { type: 'string' }, reasoning: { type: 'string' }, speed: { type: 'string' } },
   })
   const providers = await loadProviders()
   const path = resolve(process.env.SESSION_FILE ?? 'session.json')
@@ -19,13 +20,20 @@ async function main() {
   const session: Session = (await file.exists())
     ? Session.parse(await file.json())
     : { version: 1, messages: [] }
+  const wantedProvider = values.provider ?? session.selection?.provider ?? process.env.AI_PROVIDER ?? 'openai-chatgpt'
+  const providerForDiscovery = providers.find((provider) => provider.id === wantedProvider)
+  if (providerForDiscovery?.protocol === 'chatgpt' && chatgpt.status().connected)
+    providerForDiscovery.models = await chatgptModels(chatgpt)
+  else if (providerForDiscovery && ['responses', 'chat', 'anthropic'].includes(providerForDiscovery.protocol))
+    providerForDiscovery.models = await discoverModels(providerForDiscovery)
   session.selection ??= defaultSelection(providers)
-  if (values.provider || values.model || values.reasoning) {
+  if (values.provider || values.model || values.reasoning || values.speed) {
     const provider = values.provider ?? session.selection.provider
     session.selection = validateSelection({
       provider,
       model: values.model ?? (provider === session.selection.provider ? session.selection.model : providers.find((p) => p.id === provider)?.models[0]?.id),
       reasoning: values.reasoning ?? 'default',
+      serviceTier: values.speed ?? 'auto',
     }, providers).selection
   }
   recover(session)
@@ -38,10 +46,10 @@ async function main() {
   })
   const settings = () => {
     const s = session.selection!
-    console.log(`Provider: ${s.provider} | Model: ${s.model} | Reasoning: ${s.reasoning}`)
+    console.log(`Provider: ${s.provider} | Model: ${s.model} | Reasoning: ${s.reasoning} | Speed: ${!s.serviceTier || s.serviceTier === 'default' ? 'auto' : s.serviceTier}`)
   }
   console.log(
-    `Minimal successor | ${path}\nLocal shell enabled. /exit; /retry; /diagnostics; /providers; /settings; /provider <id>; /model <id>; /reasoning <level|default>; /connect-chatgpt; /chatgpt; /disconnect-chatgpt.`,
+    `Minimal successor | ${path}\nLocal shell enabled. /exit; /retry; /diagnostics; /providers; /settings; /provider <id>; /model <id>; /reasoning <level|default>; /speed <auto|standard|tier>; /connect-chatgpt; /chatgpt; /disconnect-chatgpt.`,
   )
   settings()
   while (true) {
@@ -62,7 +70,7 @@ Only approve this login if you initiated it here. The OpenAI screen may call thi
           const provider = providers.find((p) => p.protocol === 'chatgpt')
           const models = await chatgptModels(chatgpt)
           if (provider) provider.models = models
-        } catch { console.log('Model discovery unavailable; using fallback suggestions.') }
+        } catch { console.log('Model discovery unavailable; this provider cannot be used.') }
         continue
       }
       if (cmd === '/disconnect-chatgpt') { await chatgpt.disconnect(); console.log('ChatGPT credentials removed locally.'); continue }
@@ -75,21 +83,22 @@ Only approve this login if you initiated it here. The OpenAI screen may call thi
         for (const p of catalog(providers, process.env, chatgpt.status().connected)) {
           console.log(`${p.id}: ${p.label}${p.unavailable ? ` — ${p.unavailable}` : ''}`)
           if (p.note) console.log(`  ${p.note}`)
-          for (const m of p.models) console.log(`  ${m.id} (reasoning: ${['default', ...m.reasoning].join(', ')})`)
+          for (const m of p.models) console.log(`  ${m.id} (reasoning: ${['default', ...m.reasoning].join(', ')}; speed: ${['auto', 'standard', ...(m.serviceTiers ?? []).map((tier) => tier.id)].join(', ')})`)
         }
         continue
       }
       if (cmd === '/diagnostics') { console.log(JSON.stringify((session.diagnostics ?? []).map(diagnosticSummary), null, 2)); continue }
       if (cmd === '/settings') { settings(); continue }
-      if (['/provider', '/model', '/reasoning'].includes(cmd!)) {
+      if (['/provider', '/model', '/reasoning', '/speed'].includes(cmd!)) {
         if (!arg || extra.length) throw new Error(`Usage: ${cmd} <value>`)
         let next: Selection = { ...session.selection! }
         if (cmd === '/provider') {
           const provider = providers.find((p) => p.id === arg)
           if (!provider) throw new Error('Unknown provider; use /providers.')
-          next = { provider: arg, model: provider.models[0]!.id, reasoning: 'default' }
-        } else if (cmd === '/model') next = { ...next, model: arg, reasoning: 'default' }
-        else next.reasoning = arg
+          next = { provider: arg, model: provider.models[0]!.id, reasoning: 'default', serviceTier: 'auto' }
+        } else if (cmd === '/model') next = { ...next, model: arg, reasoning: 'default', serviceTier: 'auto' }
+        else if (cmd === '/reasoning') next.reasoning = arg
+        else next.serviceTier = arg as Selection['serviceTier']
         session.selection = validateSelection(next, providers).selection
         await save(path, session)
         settings()

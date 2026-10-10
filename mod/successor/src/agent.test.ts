@@ -3,8 +3,11 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Agent, recover, save, shell, type Session } from './agent.ts'
+import { builtins } from './providers.ts'
 
 const fresh = (): Session => ({ version: 1, messages: [] })
+const providers = builtins({}); providers.find((p) => p.id === 'openai')!.models = [{ id: 'test-model', reasoning: [] }]
+const configured = { providers, selection: { provider: 'openai', model: 'test-model', reasoning: 'default' } as const }
 const message = (text: string) => ({
   type: 'message',
   role: 'assistant',
@@ -31,7 +34,7 @@ describe('agent loop', () => {
     let runs = 0
     let checkpoints = 0
     const agent = new Agent(session, {
-      apiKey: 'test-only',
+      ...configured, apiKey: 'test-only',
       fetch: fake(
         [
           [{ type: 'reasoning', encrypted_content: 'opaque' }, tool()],
@@ -68,7 +71,7 @@ describe('agent loop', () => {
     let ran = false
     const session = fresh()
     const agent = new Agent(session, {
-      apiKey: 'test',
+      ...configured, apiKey: 'test',
       fetch: fake([[tool('other')], [message('Done')]]),
       run: async () => {
         ran = true
@@ -83,7 +86,7 @@ describe('agent loop', () => {
   test('HTTP failures retain history and do not leak response bodies', async () => {
     const session = fresh()
     const agent = new Agent(session, {
-      apiKey: 'test',
+      ...configured, apiKey: 'test',
       fetch: (async () => new Response('SECRET', { status: 401 })) as (
         url: string,
         init: RequestInit,
@@ -96,7 +99,7 @@ describe('agent loop', () => {
   test('rejects incomplete responses before executing tools', async () => {
     let ran = false
     const agent = new Agent(fresh(), {
-      apiKey: 'test',
+      ...configured, apiKey: 'test',
       fetch: (async () => Response.json({ status: 'incomplete', output: [tool()] })) as (
         url: string,
         init: RequestInit,
@@ -113,7 +116,7 @@ describe('agent loop', () => {
   test('caps autonomous tool steps', async () => {
     const session = fresh()
     const agent = new Agent(session, {
-      apiKey: 'test',
+      ...configured, apiKey: 'test',
       maxSteps: 1,
       fetch: fake([[tool()]]),
       run: async () => 'ok',
@@ -125,7 +128,7 @@ describe('agent loop', () => {
   test('emits refusals', async () => {
     const texts: string[] = []
     const agent = new Agent(fresh(), {
-      apiKey: 'test',
+      ...configured, apiKey: 'test',
       fetch: fake([[{ type: 'message', content: [{ type: 'refusal', refusal: 'No' }] }]]),
     })
     await agent.turn('Hi', (text) => texts.push(text))

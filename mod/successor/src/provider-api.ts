@@ -56,11 +56,14 @@ function chatMessages(messages: Item[]) {
 }
 export function apiRequest(p: Provider, selection: Selection, messages: Item[], instructions: string) {
   const effort = selection.reasoning === 'default' ? undefined : selection.reasoning
+  const serviceTier = !selection.serviceTier || ['auto', 'default'].includes(selection.serviceTier) ? undefined
+    : selection.serviceTier === 'standard' ? 'default' : selection.serviceTier
   const model = p.models.find((m) => m.id === selection.model)
   if (p.protocol === 'responses') return {
     path: '/responses',
     body: {
       model: selection.model, instructions, store: false,
+      ...(serviceTier ? { service_tier: serviceTier } : {}),
       include: ['reasoning.encrypted_content'], parallel_tool_calls: false,
       ...(effort ? { reasoning: { effort } } : {}),
       tools: [{ type: 'function', name: 'bash', description, parameters, strict: true }],
@@ -85,6 +88,7 @@ export function apiRequest(p: Provider, selection: Selection, messages: Item[], 
     path: '/chat/completions',
     body: {
       model: selection.model, stream: false,
+      ...(serviceTier ? { service_tier: serviceTier } : {}),
       ...(effort ? { reasoning_effort: effort } : {}),
       parallel_tool_calls: false,
       tools: [{ type: 'function', function: { name: 'bash', description, parameters, strict: true } }],

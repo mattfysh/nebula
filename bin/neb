@@ -4,10 +4,22 @@ set -euo pipefail
 
 bin="$(dirname "${BASH_SOURCE[0]}")"
 root="$(cd "$bin/.." && pwd)"
+name="$(basename $PWD)"
 
-docker run -it --rm \
+params=(
   -v "$root/mod:/code/mod" \
   -v "$root/mod/seed:/code/mod/seed:ro" \
+  -v "$PWD:/code/$name"
   -w "/code" \
+  -p 0.0.0.0:7112:3000 \
   --entrypoint bash \
-  oven/bun
+)
+
+image="oven/bun"
+
+if [ "$PWD" == "/Users/matt/Projects/unweb/cloud" ]; then
+  params+=(-v "/var/run/docker.sock:/var/run/docker.sock")
+  image="nebula-cloud"
+fi
+
+docker run -it --rm "${params[@]}" "$image" -ic "bun --cwd=mod/successor web; exec bash -i"

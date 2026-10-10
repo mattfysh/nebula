@@ -57,7 +57,7 @@ async function openai() {
 
   if (!res.ok) {
     console.error(await res.text())
-    throw new Error(`Response from open not ok: ${res.status}`)
+    throw new Error(`Response from openai not ok: ${res.status}`)
   }
 
   const json = await res.json()

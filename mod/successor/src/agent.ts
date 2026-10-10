@@ -8,6 +8,7 @@ import { codexTurn } from './codex.ts'
 import { opencodeTurn } from './opencode.ts'
 import { ChatGPTAuth } from './chatgpt-auth.ts'
 import { chatgptOutput } from './chatgpt.ts'
+import { UsageRecord, usageFromResponse } from './usage.ts'
 
 const Item = z.record(z.string(), z.unknown())
 export const Session = z.object({
@@ -15,6 +16,7 @@ export const Session = z.object({
   selection: Selection.optional(), backend: z.string().optional(),
   diagnostics: Attempts.optional(),
   contextStart: z.number().int().nonnegative().optional(),
+  usage: z.array(UsageRecord).optional(),
 })
 type Item = z.infer<typeof Item>
 export type Session = z.infer<typeof Session>
@@ -127,12 +129,14 @@ export class Agent {
       requestTimeoutMs?: number
       attempt?: Attempt
       progress?: (attempt: Attempt) => void
+      // Ephemeral display-only output. null retracts it before authoritative history is committed.
+      stream?: (text: string | null) => void
     },
   ) {}
 
   async turn(input: string | undefined, emit: (text: string) => void) {
     const a = this.options.attempt ?? beginAttempt(this.session, this.options.selection ?? this.session.selection ?? {
-      provider: 'openai', model: this.options.model ?? (this.options.env ?? process.env).OPENAI_MODEL ?? 'gpt-6-astra', reasoning: 'default',
+      provider: 'openai', model: this.options.model ?? (this.options.env ?? process.env).OPENAI_MODEL ?? 'unknown', reasoning: 'default',
     }, input === undefined)
     a.status = 'running'; a.startedAt = new Date().toISOString()
     const persist = async () => {
@@ -170,7 +174,7 @@ export class Agent {
     if (this.options.apiKey) env.OPENAI_API_KEY = this.options.apiKey
     const providers = this.options.providers ?? builtins(env)
     const selected = this.options.selection ?? this.session.selection ?? {
-      provider: 'openai', model: this.options.model ?? env.OPENAI_MODEL ?? 'gpt-6-astra', reasoning: 'default',
+      provider: 'openai', model: this.options.model ?? env.OPENAI_MODEL ?? '', reasoning: 'default',
     }
     let validated: ReturnType<typeof validateSelection>
     try { validated = validateSelection(selected, providers, env) }
@@ -180,7 +184,7 @@ export class Agent {
       throw new DiagnosticError('auth')
     const backend = `${provider.id}:${selection.model}`
     // Legacy sessions contain OpenAI-native history.
-    const previous = this.session.backend ?? `openai:${this.options.model ?? env.OPENAI_MODEL ?? 'gpt-6-astra'}`
+    const previous = this.session.backend ?? `openai:${this.options.model ?? env.OPENAI_MODEL ?? 'unknown'}`
     if (previous !== backend) this.session.contextStart = this.session.messages.length
     this.session.selection = selection
     this.session.backend = backend
@@ -220,7 +224,10 @@ export class Agent {
         output = await chatgptOutput({
           auth: this.options.chatgpt!, provider, selection, messages, instructions,
           progress, fetch: this.options.fetch, timeoutMs: this.options.requestTimeoutMs ?? 600_000,
+          emit: (text) => this.options.stream?.(text),
         })
+        const usage = (output as Item[] & { usage?: z.infer<typeof UsageRecord> }).usage
+        if (usage) this.session.usage = [...(this.session.usage ?? []), usage]
       } else {
         const request = apiRequest(provider, selection, messages, instructions)
         const key = provider.keyEnv ? env[provider.keyEnv] : undefined
@@ -244,6 +251,8 @@ export class Agent {
         let value: unknown
         try { value = await res.json() }
         catch (e) { throw e instanceof SyntaxError ? new DiagnosticError('response_validation') : ioError(e, this.options.requestTimeoutMs ?? 600_000) }
+        const usage = usageFromResponse(value, provider, selection)
+        if (usage) this.session.usage = [...(this.session.usage ?? []), usage]
         try { output = apiOutput(provider, value) }
         catch (e) { throw e instanceof DiagnosticError ? e : new DiagnosticError('response_validation') }
       }
@@ -252,6 +261,7 @@ export class Agent {
       try {
         for (const item of output) if (item.type === 'custom_tool_call') Tool.parse(item)
       } catch { throw new DiagnosticError('response_validation') }
+      this.options.stream?.(null)
       this.session.messages.push(...output)
       await checkpoint()
       let called = false

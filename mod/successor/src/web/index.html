@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Successor</title>
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/katex.css">
+<script src="/markdown.js" defer></script>
 <script src="/app.js" defer></script>
 </head>
 <body>
@@ -20,38 +22,46 @@
 <main id="workspace" hidden>
   <aside>
     <header><strong>Successor</strong><button id="new">+ New</button></header>
-    <button id="open-work">Work queue</button>
+    <div id="work-navigation" aria-label="Work views"><button id="open-work-queue" type="button">Queue</button><button id="open-work-structure" type="button">Plan</button></div>
     <nav id="conversations" aria-label="Conversations"></nav>
     <button id="logout">Sign out</button>
   </aside>
   <section id="work" hidden aria-labelledby="work-heading">
     <header><h1 id="work-heading">Work queue</h1><button id="close-work">Back to chat</button></header>
     <p class="warning">Plan work in order. Saved across devices. Nothing runs automatically.</p>
-    <p id="work-count" role="status"></p>
-    <button id="work-add" type="button">+ Add work</button>
-    <form id="work-form" hidden>
-      <h2 id="work-editor-heading">Add work</h2>
-      <fieldset id="work-fields">
-        <label>Title<input id="work-title" maxlength="200" required placeholder="What needs doing?"></label>
-        <label>Description<textarea id="work-description" rows="2" maxlength="16000" placeholder="Requirements and desired outcome"></textarea></label>
-        <label>Notes<textarea id="work-notes" rows="2" maxlength="16000" placeholder="Context, ideas, links, or progress"></textarea></label>
-        <div id="work-item-actions" class="actions" aria-label="Item actions"></div>
-        <div class="actions"><button id="work-cancel" type="button" hidden>Close</button><button id="work-save">Add item</button></div>
-      </fieldset>
-    </form>
-    <ol id="work-items" aria-label="Work items in priority order"></ol>
+    <div id="work-content">
+      <div id="work-list-pane">
+        <p id="work-count" role="status"></p>
+        <button id="work-add" type="button">+ Add work</button>
+        <ol id="work-items" aria-label="Focused work in priority order"></ol>
+        <div id="work-tree" hidden aria-label="Work structure"></div>
+      </div>
+      <form id="work-form" hidden>
+        <header><h2 id="work-editor-heading">Add work</h2><button id="work-cancel" type="button" hidden>Close</button></header>
+        <fieldset id="work-fields">
+          <label>Title<input id="work-title" maxlength="200" required placeholder="What needs doing?"></label>
+          <label>Description<textarea id="work-description" rows="2" maxlength="16000" placeholder="Requirements and desired outcome"></textarea></label>
+          <label>Parent<select id="work-parent"><option value="">Top level</option></select></label>
+          <p class="field-help">Place this item beneath a larger outcome or area of work.</p>
+          <label>Notes<textarea id="work-notes" rows="2" maxlength="16000" placeholder="Context, ideas, links, or progress"></textarea></label>
+          <div id="work-item-actions" class="actions" aria-label="Item actions"></div>
+          <div class="actions"><button id="work-save">Add item</button></div>
+        </fieldset>
+      </form>
+    </div>
   </section>
   <section id="chat">
     <header><h1 id="title">Choose or create a conversation</h1><button id="rename" disabled>Rename</button></header>
     <p class="warning">Separate histories · shared files and shell permissions</p>
-    <details id="settings">
-      <summary>Provider, model &amp; reasoning</summary>
+    <section id="settings" popover aria-labelledby="settings-heading">
+      <header><h2 id="settings-heading">Provider, model, reasoning &amp; speed</h2><button type="button" popovertarget="settings" popovertargetaction="hide" aria-label="Close settings">Close</button></header>
       <form id="settings-form">
         <label>Provider<select id="provider"></select></label>
-        <label>Model<input id="model" list="model-list" maxlength="160" autocomplete="off" required></label>
-        <datalist id="model-list"></datalist>
+        <label>Model<select id="model-list" required></select></label>
+        <input id="model" type="hidden">
         <label>Reasoning<select id="reasoning"></select></label>
-        <div class="actions"><button id="reset-settings" type="button">Reset</button><button id="apply-settings">Save settings</button></div>
+        <label>Speed<select id="service-tier"></select></label>
+        <div class="actions"><button id="refresh-models" type="button">Refresh models</button><button id="reset-settings" type="button">Reset</button><button id="apply-settings">Save settings</button></div>
       </form>
       <p id="provider-note"></p>
       <section id="chatgpt-connection" aria-label="ChatGPT connection">
@@ -60,29 +70,33 @@
         <div class="actions">
           <button id="chatgpt-connect" type="button">Connect ChatGPT</button>
           <button id="chatgpt-disconnect" type="button" hidden>Disconnect</button>
-          <button id="chatgpt-models" type="button" hidden>Refresh models</button>
         </div>
         <p id="chatgpt-device" hidden>Open <a href="https://auth.openai.com/codex/device" target="_blank" rel="noopener noreferrer">OpenAI’s login page</a> and enter <code id="chatgpt-code"></code>. Only approve a code you requested here. This login expires after 15 minutes.</p>
         <p class="warning">No API key or external agent required. Compatibility integration: OpenAI’s screen may say “Codex.” Device login must be allowed by your account. Credentials stay on this server; this connection is shared by your chats. Disconnect removes local credentials, not your subscription.</p>
       </section>
-      <p class="warning">Saved per conversation. Switching provider/model sends visible history as context, without private reasoning. Custom model IDs use default reasoning unless configured on the server.</p>
-    </details>
+      <p class="warning">Saved per conversation. Switching provider/model sends visible history as context, without private reasoning. Only models returned by a successful provider lookup can be selected.</p>
+    </section>
     <div id="messages" aria-label="Messages"></div>
-    <p id="status-selection"></p>
-    <p id="status" role="status">Ready</p>
-    <details id="diagnostics">
-      <summary id="diagnostic-heading">Retained attempt details (0)</summary>
+    <div class="model-selection"><span id="status-selection"></span><button id="open-settings" class="text-link" type="button" popovertarget="settings" aria-label="Change provider, model, reasoning and speed">change</button></div>
+    <form id="compose">
+      <label for="input" class="sr-only">Message</label>
+      <textarea id="input" rows="3" maxlength="32000" placeholder="Ask something… (Enter to send, Shift+Enter for newline)" disabled></textarea>
+    </form>
+    <footer id="conversation-meta">
+      <section id="usage" aria-labelledby="usage-heading"><h2 id="usage-heading" class="sr-only">Token usage</h2><p id="usage-data" role="status" aria-label="No provider-reported token usage yet. Pricing estimate unavailable">0/0/$NA</p></section>
+      <button id="open-diagnostics" type="button" aria-haspopup="dialog" aria-controls="diagnostics">Attempt details (0)</button>
+      <button id="send" type="submit" form="compose" disabled>Send</button>
+      <button id="retry" type="button" hidden>Retry failed turn</button>
+    </footer>
+    <dialog id="diagnostics" aria-labelledby="diagnostic-heading">
+      <header><h2 id="diagnostic-heading">Retained attempt details (0)</h2><button id="close-diagnostics" type="button" autofocus>Close</button></header>
+      <p id="status" role="status">Ready</p>
       <p class="warning">Last 50 attempts per conversation, saved across retries and restarts. Retry creates a new attempt; nothing retries automatically. After interruption, commands may have run: inspect effects before continuing. CLI tool progress depends on emitted events.</p>
       <div id="diagnostic-list"></div>
       <button id="copy-diagnostics" type="button">Copy sanitized diagnostics</button>
       <label for="diagnostic-summary" class="sr-only">Sanitized diagnostic summary</label>
       <textarea id="diagnostic-summary" readonly rows="4" spellcheck="false"></textarea>
-    </details>
-    <form id="compose">
-      <label for="input" class="sr-only">Message</label>
-      <textarea id="input" rows="3" maxlength="32000" placeholder="Ask something… (Ctrl/⌘+Enter to send)" disabled></textarea>
-      <div class="actions"><button id="retry" type="button" hidden>Retry failed turn</button><button id="send" disabled>Send</button></div>
-    </form>
+    </dialog>
   </section>
 </main>
 <p id="notice" role="alert"></p>

@@ -8,13 +8,21 @@
     "check": "tsc --noEmit",
     "web": "bash scripts/web.sh",
     "tunnel": "bun scripts/tunnel.ts",
-    "remote": "bash scripts/remote.sh"
+    "remote": "bash scripts/remote.sh",
+    "build:markdown": "bun build src/web-src/markdown.js --outfile src/web/markdown.js --target browser --format iife --minify"
   },
   "dependencies": {
+    "@mdit/plugin-katex": "^1.1.1",
+    "katex": "^0.18.7",
+    "markdown-it": "^15.0.2",
+    "markdown-it-deflist": "^4.0.0",
+    "markdown-it-footnote": "^4.0.0",
+    "markdown-it-task-lists": "^2.1.1",
     "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/markdown-it": "^14.2.0",
     "typescript": "^7"
   }
 }

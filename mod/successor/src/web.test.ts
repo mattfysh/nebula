@@ -7,7 +7,12 @@ import { createApp, credential } from './web.ts'
 async function fixture(agentOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'successor-web-'))
   const token = await credential(directory)
-  const app = await createApp({ directory, token, apiKey: 'test', agentOptions })
+  const supplied: any = agentOptions
+  const app = await createApp({ directory, token, apiKey: 'test', env: { AI_PROVIDER: 'openai' }, agentOptions: {
+    ...supplied, fetch: async (url: string, init: RequestInit) => url.endsWith('/models')
+      ? Response.json({ data: [{ id: 'gpt-5.2' }, { id: 'gpt-4.1' }] })
+      : supplied.fetch(url, init),
+  } })
   let cookie = ''
   const request = (path: string, method = 'GET', data?: unknown, origin = 'http://localhost') =>
     app.fetch(new Request('http://localhost/api' + path, {
@@ -41,7 +46,7 @@ test('private stable credential; authentication, CSRF, logout and safe static ro
   } finally { await f.cleanup() }
 })
 
-test('independent histories, serialized turns, duplicate rejection and persistence', async () => {
+test('independent histories, three parallel turns, queue limit, duplicate rejection and persistence', async () => {
   let release!: () => void
   const gate = new Promise<void>((r) => { release = r })
   const requests: any[] = []
@@ -56,18 +61,23 @@ test('independent histories, serialized turns, duplicate rejection and persisten
     await f.login()
     const a: any = await (await f.request('/conversations', 'POST', {})).json()
     const b: any = await (await f.request('/conversations', 'POST', {})).json()
+    const c: any = await (await f.request('/conversations', 'POST', {})).json()
+    const d: any = await (await f.request('/conversations', 'POST', {})).json()
     expect((await f.request(`/conversations/${a.id}/turn`, 'POST', { input: 'First only' })).status).toBe(202)
     expect((await f.request(`/conversations/${a.id}/turn`, 'POST', { input: 'duplicate' })).status).toBe(409)
     expect((await f.request(`/conversations/${b.id}/turn`, 'POST', { input: 'Second only' })).status).toBe(202)
+    expect((await f.request(`/conversations/${c.id}/turn`, 'POST', { input: 'Third only' })).status).toBe(202)
+    expect((await f.request(`/conversations/${d.id}/turn`, 'POST', { input: 'Fourth waits' })).status).toBe(202)
     await Bun.sleep(20)
-    expect(requests).toHaveLength(1)
-    expect(((await (await f.request(`/conversations/${b.id}`)).json()) as any).status).toBe('queued')
+    expect(requests).toHaveLength(3)
+    expect(((await (await f.request(`/conversations/${b.id}`)).json()) as any).status).toBe('running')
+    expect(((await (await f.request(`/conversations/${d.id}`)).json()) as any).status).toBe('queued')
     // Metadata writes are serialized with running checkpoints.
     expect((await f.request(`/conversations/${a.id}`, 'PATCH', { title: 'Renamed' })).status).toBe(200)
     release()
     await f.app.drained()
-    expect(requests).toHaveLength(2)
-    expect(requests[1].input).toEqual([{ role: 'user', content: 'Second only' }])
+    expect(requests).toHaveLength(4)
+    expect(requests.map((r) => r.input[0].content).sort()).toEqual(['First only', 'Fourth waits', 'Second only', 'Third only'].sort())
     const view: any = await (await f.request(`/conversations/${a.id}`)).json()
     expect(view.title).toBe('Renamed')
     expect(view.status).toBe('idle')
@@ -94,7 +104,7 @@ test('restart marks interrupted commands without replay and permits explicit ret
     let runs = 0
     const restarted = await createApp({
       directory: f.directory, token: f.token, apiKey: 'test',
-      agentOptions: { run: async () => { runs++; return '' }, fetch: async () => Response.json({ status: 'completed', output: [message('Reviewed')] }) },
+      agentOptions: { run: async () => { runs++; return '' }, fetch: async (url) => url.endsWith('/models') ? Response.json({ data: [{ id: 'gpt-5.2' }] }) : Response.json({ status: 'completed', output: [message('Reviewed')] }) },
     })
     const login = await restarted.fetch(new Request('http://localhost/api/login', {
       method: 'POST', headers: { origin: 'http://localhost', 'content-type': 'application/json' }, body: JSON.stringify({ token: f.token }),
@@ -151,7 +161,7 @@ test('authenticated provider catalog and per-conversation settings validate, loc
     expect(JSON.stringify(config)).not.toContain('baseURL')
     const a: any = await (await f.request('/conversations', 'POST', {})).json()
     const b: any = await (await f.request('/conversations', 'POST', {})).json()
-    const settings = { provider: 'openai', model: 'gpt-5.2', reasoning: 'high' }
+    const settings = { provider: 'openai', model: 'gpt-5.2', reasoning: 'default' }
     expect((await f.request(`/conversations/${a.id}`, 'PATCH', { selection: settings }, 'https://evil.example')).status).toBe(403)
     expect((await f.request(`/conversations/${a.id}`, 'PATCH', { selection: { ...settings, reasoning: 'bogus' } })).status).toBe(400)
     expect((await f.request(`/conversations/${a.id}`, 'PATCH', { selection: { ...settings, provider: 'claude-subscription' } })).status).toBe(400)
@@ -161,7 +171,7 @@ test('authenticated provider catalog and per-conversation settings validate, loc
     expect((await f.request(`/conversations/${a.id}`, 'PATCH', { selection: { ...settings, reasoning: 'low' } })).status).toBe(409)
     await Bun.sleep(10)
     expect(requests[0].body.model).toBe('gpt-5.2')
-    expect(requests[0].body.reasoning).toEqual({ effort: 'high' })
+    expect(requests[0].body).not.toHaveProperty('reasoning')
     const other: any = await (await f.request(`/conversations/${b.id}`)).json()
     expect(other.selection).toEqual(config.defaults)
     release(); await f.app.drained()
@@ -185,6 +195,7 @@ test('web starts without an OpenAI key and sends through another configured prov
       directory, token: 'test-access-token',
       env: { AI_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'private-test-key' },
       agentOptions: { fetch: async (url, init) => {
+        if (url === 'https://api.anthropic.com/v1/models') return Response.json({ data: [{ id: 'claude-sonnet-4-6', display_name: 'Claude Sonnet 4.6' }] })
         requested = true
         expect(url).toBe('https://api.anthropic.com/v1/messages')
         expect((init.headers as any)['x-api-key']).toBe('private-test-key')
@@ -251,7 +262,7 @@ test('tool-step limit explains how to continue and retry does not replay complet
 test('work queue API requires authentication and same-origin writes, persists independently of conversations', async () => {
   const f = await fixture()
   try {
-    const data = { revision: 0, command: { action: 'add', item: { title: 'Plan release', description: 'Run checks', notes: 'Ask for review', done: false } } }
+    const data = { command: { action: 'add', revision: 0, item: { title: 'Plan release', description: 'Run checks', notes: 'Ask for review', done: false, parentId: null } } }
     expect((await f.request('/work-queue')).status).toBe(401)
     expect((await f.request('/work-queue', 'POST', data)).status).toBe(401)
     await f.login()
@@ -261,7 +272,62 @@ test('work queue API requires authentication and same-origin writes, persists in
     const state: any = await (await f.request('/work-queue')).json()
     expect(state.items[0].notes).toBe('Ask for review')
     expect(await (await f.request('/conversations')).json()).toEqual([])
-    expect((await f.request('/work-queue', 'POST', { ...data, revision: 1, command: { action: 'run' } })).status).toBe(400)
+    expect((await f.request('/work-queue', 'POST', { command: { action: 'run' } })).status).toBe(400)
     expect((await f.app.fetch(new Request('http://localhost/work-queue.json'))).status).toBe(404)
+  } finally { await f.cleanup() }
+})
+
+test('tool checkpoints refresh the event stream before the turn completes', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const f = await fixture({
+    fetch: async () => Response.json({ status: 'completed', output: [
+      { type: 'custom_tool_call', name: 'bash', input: 'example', call_id: 'live-call' },
+    ] }),
+    run: async () => { await gate; return 'result' },
+    maxSteps: 1,
+  })
+  let reader: any
+  try {
+    await f.login()
+    const c: any = await (await f.request('/conversations', 'POST', {})).json()
+    const events = await f.request('/events')
+    reader = events.body!.getReader()
+    await reader.read() // snapshot
+
+    expect((await f.request(`/conversations/${c.id}/turn`, 'POST', { input: 'Use a tool' })).status).toBe(202)
+    const refresh = (async () => {
+      while (true) {
+        const event = await reader!.read()
+        const text = new TextDecoder().decode(event.value)
+        if (text.includes('event: refresh')) return text
+      }
+    })()
+    expect(await Promise.race([
+      refresh,
+      Bun.sleep(1_000).then(() => { throw new Error('Timed out waiting for tool refresh') }),
+    ])).toContain('event: refresh')
+    const view: any = await (await f.request(`/conversations/${c.id}`)).json()
+    expect(view.status).toBe('running')
+    expect(view.messages.at(-1)).toEqual({ kind: 'command', text: 'example' })
+  } finally {
+    release()
+    await reader?.cancel()
+    await f.app.drained()
+    await f.cleanup()
+  }
+})
+
+test('authenticated application event stream exposes SSE snapshots', async () => {
+  const f = await fixture()
+  try {
+    await f.login()
+    const response = await f.request('/events')
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    const reader = response.body!.getReader()
+    const first = await reader.read()
+    expect(new TextDecoder().decode(first.value)).toContain('event: snapshot')
+    await reader.cancel()
   } finally { await f.cleanup() }
 })

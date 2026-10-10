@@ -14,7 +14,8 @@ async function fixture(script: string) {
     cleanup: () => rm(directory, { recursive: true, force: true }),
   }
 }
-const selection = { provider: 'openai-subscription', model: 'gpt-5.2-codex', reasoning: 'high' }
+const selection = { provider: 'openai-subscription', model: 'test-codex', reasoning: 'high' }
+const providers = builtins({}); providers.find((p) => p.id === 'openai-subscription')!.models = [{ id: 'test-codex', reasoning: ['high'] }]
 test('subscription uses official CLI boundary, no API keys, explicit sandbox/effort and portable context', async () => {
   const f = await fixture(`
 [[ -z "\${OPENAI_API_KEY+x}" && -z "\${CODEX_API_KEY+x}" ]] || exit 2
@@ -32,7 +33,7 @@ echo '{"type":"turn.completed"}'
     ] }
     const text: string[] = []
     await new Agent(session, {
-      env: f.env, providers: builtins({}), selection,
+      env: f.env, providers, selection,
       fetch: async () => { throw new Error('Must not use API') },
       run: async () => { throw new Error('Must not execute CLI commands again') },
     }).turn('continue', (s) => text.push(s))
@@ -52,14 +53,14 @@ exit 1
 `)
   try {
     const session: Session = { version: 1, messages: [] }
-    await expect(new Agent(session, { env: f.env, providers: builtins({}), selection }).turn('hi', () => {})).rejects.toThrow('Unknown failure')
+    await expect(new Agent(session, { env: f.env, providers, selection }).turn('hi', () => {})).rejects.toThrow('Unknown failure')
     expect(JSON.stringify(session)).not.toContain('PRIVATE-')
     recover(session)
     expect(session.messages.at(-1)?.output).toContain('may have run')
     await writeFile(join(f.env.PATH.split(':')[0]!, 'codex'), '#!/bin/bash\ncat >/dev/null\nsleep 30\n', { mode: 0o700 })
     const start = Date.now()
     await expect(new Agent({ version: 1, messages: [] }, {
-      env: f.env, providers: builtins({}), selection, requestTimeoutMs: 100,
+      env: f.env, providers, selection, requestTimeoutMs: 100,
     }).turn('hi', () => {})).rejects.toThrow('Request timed out')
     expect(Date.now() - start).toBeLessThan(3000)
   } finally { await f.cleanup() }

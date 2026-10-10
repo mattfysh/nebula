@@ -40,7 +40,7 @@ bun run tunnel    # optional tunnel to that server
 ```
 
 `WEB_PORT` defaults to `3000`; `WEB_DATA_DIR` defaults to `web-data`.
-`OPENAI_MODEL` defaults to `gpt-6-astra` for backward compatibility; select a model your account supports. Start from this project directory.
+The global default is `openai-chatgpt` / `gpt-5.6-sol` / `default`. `OPENAI_MODEL` defaults to `gpt-5.6-sol` for the OpenAI API provider; select a model your account supports. Start from this project directory.
 Use `bun run web` or `bun run remote`, not the raw web entry point: the scripts
 hold an OS lock to prevent two servers from modifying the same data directory.
 
@@ -52,10 +52,12 @@ hold an OS lock to prevent two servers from modifying the same data directory.
 - Send with the button or Ctrl/⌘+Enter; Enter alone inserts a newline.
 - Drafts survive switching in the current tab, not page reloads.
 - Turns are server-owned: changing conversations, reconnecting, or closing the
-  browser does not cancel them. Changes appear through 1.5-second polling at
-  response/tool checkpoints, **not token-by-token streaming**.
-- Turns across conversations run one at a time to avoid concurrent shell
-  execution. Duplicate submissions while a conversation is busy return 409.
+  browser does not cancel them. Conversation changes and ChatGPT response text arrive over one application-wide event stream. Response text is
+  streamed live to the selected conversation. Partial text is display-only and is
+  replaced by validated, persisted history when the response completes.
+- Up to three conversations run in parallel; additional turns remain queued.
+  Duplicate submissions while a conversation is busy return 409. Parallel agents
+  share the same filesystem, so avoid assigning conflicting edits or commands.
 - Errors retain history and enable Retry. On server restart, queued/running
   turns become interrupted; they are never automatically replayed. Review
   history before retrying, especially after uncertain command execution.
@@ -63,21 +65,25 @@ hold an OS lock to prevent two servers from modifying the same data directory.
   imported as an independent snapshot. The live CLI session is never modified.
   This is not live synchronization between the CLI and web histories.
 
-### Work queue
+### Work structure and focus queue
 
-Open **Work queue** in the sidebar to plan work independently of conversations.
-Add a title, description/requirements, and notes. Use **Move up / Move down** to
-arrange priority (also works on touch devices and with a keyboard), **Edit / notes**
-to revise an item, and **Mark done / Reopen** to track completion. Deleting an item
-asks for confirmation and removes its notes too.
+Open **Work queue** in the sidebar. **Work structure** is the complete hierarchy:
+create top-level outcomes, add children, and reparent work without implying that
+every item is an immediate priority. **Focus queue** is a deliberately selected,
+globally ordered list of work to do next. Queueing and dequeueing never deletes
+the underlying item. Completing focused work removes it from the queue.
 
-The queue is a manual planning list: it does not submit prompts or execute work.
-Items, order, and completion are saved privately in `WEB_DATA_DIR/work-queue.json`
-and shared across your signed-in devices. Unsaved editor text stays when switching
-between the queue and chat in this page, but does not survive reloads. Polling
-updates the list without replacing your draft. Conflicting saves are rejected;
-review the refreshed list before saving your retained draft again. Limits are
-1,000 items, 200 characters per title, and 16,000 each for descriptions and notes.
+Items are stored separately under `WEB_DATA_DIR/work-queue/items/`; the small
+`index.json` stores queue order and revisions. Item-scoped revisions allow
+unrelated items to be edited without false conflicts, while queue ordering has
+its own revision. Existing `work-queue.json` data is migrated once; its unfinished
+items initially retain their prior order in the focus queue. Keep the old file as
+migration/backup input.
+
+The planner never submits prompts or executes work. Conflicting edits are rejected
+and refreshed for review. Limits remain 1,000 items, 200 characters per title,
+and 16,000 each for descriptions and notes. Deleting a parent preserves its
+children by promoting them one level.
 
 ### Security and lifetime
 
@@ -202,10 +208,17 @@ ten-minute timeout and bounded event-output limit. Each turn starts a new CLI
 invocation with visible conversation context, not a resumed Codex session.
 Do not enable it unless you trust the installed CLI and its local configuration.
 
-Model suggestions are a small editable capability catalog, **not** a live list of
-your account's entitlements. Enter any model ID supported by the chosen endpoint.
-Unknown models allow only **Provider default** reasoning (no reasoning parameter
-is sent). To expose reasoning for additional models, configure their capabilities
+The settings panel can refresh model IDs from OpenAI-compatible API, Anthropic,
+and direct ChatGPT model endpoints using server-side credentials. There are no static model or capability fallbacks. Providers remain unavailable when
+their catalog cannot be loaded; CLI-backed providers are unavailable until model discovery
+is integrated for them. A model endpoint indicates catalog visibility, not necessarily entitlement to
+every model or compatibility with the selected inference protocol. The direct ChatGPT
+catalog. Speed is independent
+of reasoning. **Provider default** omits `service_tier`; **Standard** explicitly sends
+`service_tier: "default"`. Other entries use the exact tier IDs advertised by the
+selected provider/account, such as `priority` or `ultrafast`. Every profile shows only capabilities returned by its own lookup. A catalog that returns
+model IDs without reasoning or speed metadata permits only Provider default reasoning
+and speed. To expose reasoning for additional models, configure their capabilities
 below rather than guessing. Known OpenAI/Zen reasoning models send effort; Claude
 4.6 uses adaptive thinking/effort, while the configured Claude 4.5 model maps
 low/medium/high to 1024/4096/8192 thinking tokens. Reasoning resets to default
@@ -220,9 +233,10 @@ native reasoning/tool continuity.
 
 ### Defaults and additional providers
 
-`AI_PROVIDER`, `AI_MODEL`, and `AI_REASONING` set defaults for new conversations/
-sessions. Existing saved selections win. Legacy `OPENAI_MODEL` is still supported.
-For example, use `AI_PROVIDER=anthropic` with `ANTHROPIC_API_KEY` to start with Claude.
+`AI_PROVIDER`, `AI_MODEL`, `AI_REASONING`, and `AI_SERVICE_TIER` select defaults
+for new conversations after a successful catalog lookup. Existing saved selections win,
+but they cannot run if the current authoritative catalog no longer contains their model
+or capability. A failed lookup leaves that provider unavailable and the UI shows why.
 
 Set `PROVIDERS_FILE` to a server-side JSON file containing additional profiles.
 Profiles with an existing ID replace that entire built-in profile. Restart after
@@ -236,18 +250,14 @@ configuration or credential changes. Supported API protocols are `responses`,
     "label": "My OpenAI-compatible gateway",
     "protocol": "chat",
     "baseURL": "https://gateway.example/v1",
-    "keyEnv": "GATEWAY_API_KEY",
-    "models": [
-      { "id": "my-model", "reasoning": ["low", "medium", "high"] },
-      { "id": "plain-model", "reasoning": [] }
-    ]
+    "keyEnv": "GATEWAY_API_KEY"
   }
 ]
 ```
 
-Use the endpoint's exact model IDs and only reasoning levels it documents.
-For Claude profiles, set each reasoning model's `reasoningMode` to `adaptive` or
-`budget`. For other OpenCode Zen protocols, add a profile with the appropriate
+The profile defines connection details only. Any `models` supplied in a profile are
+discarded; model IDs and capabilities must come from the provider lookup. For other
+OpenCode Zen protocols, add a profile with the appropriate
 protocol, Zen base URL, and `keyEnv: "OPENCODE_API_KEY"`.
 For a local unauthenticated endpoint, omit `keyEnv`. Remote endpoints should use
 HTTPS. Credentials belong in server environment variables, **not** in the JSON,
@@ -265,10 +275,10 @@ bun start --provider anthropic --model claude-sonnet-4-6 --reasoning high
 
 At the prompt:
 ```text
-/providers                 # availability, model suggestions, reasoning levels
+/providers                 # lookup status, discovered models and capabilities
 /settings                  # current saved selection
 /provider openai           # select provider and its first model
-/model gpt-5.2             # custom model IDs also accepted
+/model <discovered-id>      # must be present in the provider catalog
 /reasoning high            # or default
 ```
 
@@ -293,7 +303,7 @@ bun run check
 Tests cover provider payloads/capabilities, mocked Codex/OpenCode execution,
 settings validation/routing/persistence, provider switches, agent responses/tools,
 bounded shell execution, persistence,
-authentication/CSRF, isolated histories, serialized turns, conflicting sends,
+authentication/CSRF, isolated histories, bounded parallel turns, conflicting sends,
 restart recovery, error handling, and private transcript projection.
 
 Provider tests use mocked HTTP/CLI responses; they do not verify live account access or make paid requests.

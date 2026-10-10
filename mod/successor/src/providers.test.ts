@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { Agent, type Session } from './agent.ts'
-import { builtins, catalog, validateSelection, loadProviders, type Selection } from './providers.ts'
+import { builtins, catalog, defaultSelection, validateSelection, loadProviders, type Selection } from './providers.ts'
 import { apiOutput, apiRequest } from './provider-api.ts'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -8,18 +8,39 @@ import { join } from 'node:path'
 
 const env = { OPENAI_API_KEY: 'private-openai', ANTHROPIC_API_KEY: 'private-claude', OPENCODE_API_KEY: 'private-zen' }
 const providers = builtins({})
+const setModels = (id: string, models: any[]) => { providers.find((p) => p.id === id)!.models = models }
+setModels('openai', [
+  { id: 'gpt-6.1-sol', reasoning: ['low', 'medium', 'high'], serviceTiers: [{ id: 'fast', name: 'Fast' }, { id: 'ultrafast', name: 'Ultrafast' }] },
+  { id: 'gpt-5.2', reasoning: ['none', 'low', 'medium', 'high', 'xhigh'] }, { id: 'gpt-4.1', reasoning: [] },
+])
+setModels('anthropic', [{ id: 'claude-sonnet-4-6', reasoning: ['low', 'medium', 'high'], reasoningMode: 'adaptive' }, { id: 'claude-sonnet-4-5', reasoning: ['low', 'medium', 'high'], reasoningMode: 'budget' }])
+setModels('opencode', [{ id: 'gpt-5.2', reasoning: ['none', 'low', 'medium', 'high', 'xhigh'] }])
+setModels('openai-chatgpt', [{ id: 'gpt-6.1-sol', reasoning: ['standard', 'extended'], serviceTiers: [{ id: 'ultrafast', name: 'Ultrafast' }] }])
 const fresh = (): Session => ({ version: 1, messages: [] })
-const selection = (provider = 'openai', model = 'gpt-5.2', reasoning = 'high'): Selection => ({ provider, model, reasoning })
+const selection = (provider = 'openai', model = 'gpt-5.2', reasoning = 'high', serviceTier: Selection['serviceTier'] = 'default'): Selection => ({ provider, model, reasoning, serviceTier })
+test('built-in providers contain no static model or capability data', () => {
+  expect(builtins({}).every((provider) => provider.models.length === 0)).toBe(true)
+  expect(() => defaultSelection(builtins({}), {})).toThrow('No discovered models')
+  expect(defaultSelection(providers, { AI_PROVIDER: 'openai' })).toEqual({ provider: 'openai', model: 'gpt-6.1-sol', reasoning: 'default', serviceTier: 'auto' })
+})
+
 const assistant = { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Done' }] }
+
+test('GPT-6.1 Sol API supports independent reasoning and documented speed tiers', () => {
+  const api = providers.find((p) => p.id === 'openai')!
+  const sol = api.models.find((m) => m.id === 'gpt-6.1-sol')
+  expect(sol?.serviceTiers?.map((tier) => tier.id)).toEqual(['fast', 'ultrafast'])
+  expect(validateSelection(selection('openai', 'gpt-6.1-sol', 'high', 'ultrafast'), providers, env).model).toEqual(sol!)
+})
 
 test('capabilities validate configured reasoning, unknown models default only; catalog omits keys/endpoints', () => {
   expect(validateSelection(selection(), providers, env).selection.reasoning).toBe('high')
   expect(() => validateSelection(selection('openai', 'gpt-4.1'), providers, env)).toThrow('not supported')
-  expect(() => validateSelection(selection('openai', 'new-model'), providers, env)).toThrow('not supported')
-  expect(validateSelection(selection('openai', 'new-model', 'default'), providers, env).selection.model).toBe('new-model')
+  expect(() => validateSelection(selection('openai', 'new-model'), providers, env)).toThrow('not in the provider catalog')
+  expect(() => validateSelection(selection('openai', 'new-model', 'default'), providers, env)).toThrow('not in the provider catalog')
   expect(() => validateSelection(selection('missing'), providers, env)).toThrow('Unknown provider')
   expect(() => validateSelection(selection(), providers, {})).toThrow('Set OPENAI_API_KEY')
-  expect(() => validateSelection(selection('claude-subscription'), providers, env)).toThrow('No subscription-token')
+  expect(() => validateSelection(selection('claude-subscription', 'claude-sonnet-4-6'), providers, env)).toThrow('Subscription integration')
   const publicData = JSON.stringify(catalog(providers, env))
   expect(publicData).not.toContain('private-')
   expect(publicData).not.toContain('baseURL')
@@ -45,6 +66,14 @@ test('OpenAI function tools execute and reasoning setting is sent; reasoning omi
   await agent.turn('hello', () => {})
   expect(calls).toBe(1)
   expect(requests[0].reasoning).toEqual({ effort: 'high' })
+  const ultraProvider = { ...providers.find((p) => p.id === 'openai-chatgpt')!, protocol: 'responses' as const }
+  const ultra = apiRequest(ultraProvider, selection('openai-chatgpt', 'gpt-6.1-sol', 'high', 'ultrafast'), [], '').body as any
+  expect(ultra.service_tier).toBe('ultrafast')
+  const diagnosticSession = fresh()
+  await new Agent(diagnosticSession, { env, providers, selection: selection('openai', 'gpt-6.1-sol', 'high', 'fast'), fetch: async () => Response.json({ status: 'completed', output: [assistant] }) }).turn('fast', () => {})
+  expect(diagnosticSession.diagnostics?.[0]?.serviceTier).toBe('fast')
+  expect((apiRequest(ultraProvider, selection('openai-chatgpt', 'gpt-6.1-sol', 'high', 'standard'), [], '').body as any).service_tier).toBe('default')
+  expect(apiRequest(ultraProvider, selection('openai-chatgpt', 'gpt-6.1-sol', 'high', 'auto'), [], '').body).not.toHaveProperty('service_tier')
   expect(requests[0].tools[0].type).toBe('function')
   expect(requests[1].input.at(-1)).toEqual({ type: 'function_call_output', call_id: 'f1', output: 'ok' })
   expect(apiRequest(providers[0]!, selection('openai', 'gpt-4.1', 'default'), [], '').body).not.toHaveProperty('reasoning')
@@ -144,7 +173,7 @@ test('server profiles extend providers and model capabilities without including 
       models: [{ id: 'local-model', reasoning: ['low', 'high'] }],
     }]))
     const loaded = await loadProviders({ PROVIDERS_FILE: path })
-    expect(validateSelection(selection('local', 'local-model'), loaded, {}).provider.protocol).toBe('chat')
+    expect(loaded.find((p) => p.id === 'local')?.models).toEqual([])
     expect(loaded).toHaveLength(providers.length + 1)
   } finally { await rm(directory, { recursive: true, force: true }) }
 })

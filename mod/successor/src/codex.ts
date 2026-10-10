@@ -8,6 +8,8 @@ export async function codexTurn(options: CliTurnOptions) {
     '-c', 'model_provider="openai"', '-c', 'forced_login_method="chatgpt"']
   if (options.selection.reasoning !== 'default')
     args.push('-c', `model_reasoning_effort=${JSON.stringify(options.selection.reasoning)}`)
+  if (options.selection.serviceTier && !['auto', 'default'].includes(options.selection.serviceTier))
+    args.push('-c', `service_tier=${JSON.stringify(options.selection.serviceTier === 'standard' ? 'default' : options.selection.serviceTier)}`)
   args.push('-')
   const env = { ...(options.env ?? process.env) }
   delete env.OPENAI_API_KEY
